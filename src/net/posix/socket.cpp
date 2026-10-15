@@ -17,7 +17,10 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#if __has_include(<sys/eventfd.h>)
 #include <sys/eventfd.h>
+#define MSGA_HAVE_EVENTFD 1
+#endif
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -33,6 +36,7 @@ long     tlsRead(TlsConn *c, char *buf, size_t n, short *want, std::string *erro
 long     tlsWrite(TlsConn *c, const char *buf, size_t n, short *want, std::string *error);
 bool     tlsPending(const TlsConn *c);
 
+#if defined(MSGA_HAVE_EVENTFD)
 // An eventfd: readable from set() on, so a waitFd with it as the wake fd
 // returns Cancelled at once (and every later wait sees the flag first).
 Cancel::Cancel() : _os(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {}
@@ -49,6 +53,31 @@ void Cancel::set() {
         [[maybe_unused]] const ssize_t r   = ::write(int(_os), &one, sizeof one);
     }
 }
+#else
+// Self-pipe fallback for POSIX targets without eventfd.
+Cancel::Cancel() {
+    int fds[2];
+    if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0) {
+        _os        = fds[0];
+        _wakeWrite = fds[1];
+    }
+}
+
+Cancel::~Cancel() {
+    if (_os >= 0) {
+        ::close(int(_os));
+        ::close(_wakeWrite);
+    }
+}
+
+void Cancel::set() {
+    _flag.store(true, std::memory_order_release);
+    if (_os >= 0) {
+        const char                     one = 1;
+        [[maybe_unused]] const ssize_t r   = ::write(_wakeWrite, &one, 1);
+    }
+}
+#endif
 
 Wait waitFd(int fd, short events, const Waiter &w, bool returnOnWake) {
     for (;;) {
@@ -185,11 +214,14 @@ void appendAddrs(const addrinfo *list, std::vector<Addr> *out) {
 // sides hold a reference; the last one out frees the state (and an answer
 // nobody waits for any more).
 struct Lookup {
-    std::mutex       mutex;
-    std::string      host, port;
-    addrinfo        *result = nullptr;
-    int              rc     = 0;
-    int              fd     = -1;
+    std::mutex  mutex;
+    std::string host, port;
+    addrinfo   *result = nullptr;
+    int         rc     = 0;
+    int         fd     = -1;
+#if !defined(MSGA_HAVE_EVENTFD)
+    int wakeFd = -1;
+#endif
     std::atomic<int> refs{2};
 
     void release() {
@@ -199,6 +231,10 @@ struct Lookup {
             freeaddrinfo(result);
         if (fd >= 0)
             ::close(fd);
+#if !defined(MSGA_HAVE_EVENTFD)
+        if (wakeFd >= 0)
+            ::close(wakeFd);
+#endif
         delete this;
     }
 };
@@ -214,8 +250,13 @@ void lookupThread(Lookup *lk) {
         lk->rc     = rc;
         lk->result = rc == 0 ? res : nullptr;
     }
+#if defined(MSGA_HAVE_EVENTFD)
     const uint64_t                 one = 1;
     [[maybe_unused]] const ssize_t r   = ::write(lk->fd, &one, sizeof one);
+#else
+    const char                     one = 1;
+    [[maybe_unused]] const ssize_t r   = ::write(lk->wakeFd, &one, 1);
+#endif
     lk->release();
 }
 
@@ -239,7 +280,15 @@ bool resolve(const Url &url, const Waiter &w, std::vector<Addr> *out, std::strin
     auto *lk = new Lookup;
     lk->host = url.host;
     lk->port = port;
-    lk->fd   = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#if defined(MSGA_HAVE_EVENTFD)
+    lk->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#else
+    int fds[2];
+    if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0) {
+        lk->fd     = fds[0];
+        lk->wakeFd = fds[1];
+    }
+#endif
     if (lk->fd < 0) {
         *error = sysError("dns", errno);
         delete lk;
@@ -248,6 +297,9 @@ bool resolve(const Url &url, const Waiter &w, std::vector<Addr> *out, std::strin
     base::Thread thread;
     if (!thread.start([lk] { lookupThread(lk); }, kThreadStack)) {
         ::close(lk->fd);
+#if !defined(MSGA_HAVE_EVENTFD)
+        ::close(lk->wakeFd);
+#endif
         delete lk;
         *error = "dns: no thread";
         return false;

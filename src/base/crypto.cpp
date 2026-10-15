@@ -8,7 +8,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__)
 #include <stdlib.h>
 #else
 #include <cerrno>
@@ -261,7 +261,7 @@ bool randomBytes(void *out, size_t n) {
     return BCryptGenRandom(
                nullptr, static_cast<PUCHAR>(out), ULONG(n), BCRYPT_USE_SYSTEM_PREFERRED_RNG
            ) == 0;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__)
     arc4random_buf(out, n);
     return true;
 #else

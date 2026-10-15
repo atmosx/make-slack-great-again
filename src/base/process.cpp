@@ -26,8 +26,16 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#elif defined(__OpenBSD__)
+#include <sys/sysctl.h>
 #endif
 extern char **environ;
+
+// posix_spawn_file_actions_addchdir_np is a glibc/macOS extension; other
+// systems use fork/exec, also allowing setup/exec errors to reach the caller.
+#if defined(__linux__) || defined(__APPLE__)
+#define MSGA_POSIX_SPAWN_ADDCHDIR_NP 1
+#endif
 #endif
 
 namespace base {
@@ -460,20 +468,180 @@ void initSpawnAttr(posix_spawnattr_t *attr) {
     posix_spawnattr_setflags(attr, flags);
 }
 
+#ifndef MSGA_POSIX_SPAWN_ADDCHDIR_NP
+// OpenBSD's posix_spawn cannot report an exec failure to the caller: its
+// child exits 127 instead of the call returning the errno (the man page says
+// so; it also chokes on POSIX_SPAWN_SETSIGDEF with a full signal set, whose
+// uncatchable members make its child-side sigaction fail). So where
+// posix_spawn_file_actions_addchdir_np is unavailable we fork and report the
+// child's setup/exec failure through a CLOEXEC pipe, as glibc/macOS do.
+
+// POSIX_SPAWN_SETSIGDEF applied by hand: reset the signals in `sigdef` to
+// SIG_DFL. SIGKILL/SIGSTOP (and, on some systems, other reserved signals)
+// cannot be changed (OpenBSD also reserves SIGTHR).
+int resetSignalDefaults(const sigset_t &sigdef) {
+    for (int s = 1; s < NSIG; ++s) {
+        if (!::sigismember(&sigdef, s))
+            continue;
+        struct sigaction sa;
+        ::memset(&sa, 0, sizeof sa);
+        sa.sa_handler = SIG_DFL;
+        ::sigemptyset(&sa.sa_mask);
+        if (::sigaction(s, &sa, nullptr) < 0 && errno != EINVAL)
+            return errno;
+    }
+    return 0;
+}
+
+int spawnErrorPipe(int fds[2]) {
+    if (::pipe2(fds, O_CLOEXEC) != 0)
+        return errno;
+    // Keep the reporting descriptors clear of stdio, even if the caller
+    // started with one of 0/1/2 closed.
+    for (int i = 0; i < 2; ++i) {
+        int      &fd    = fds[i];
+        const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        if (moved < 0) {
+            const int e = errno;
+            ::close(fds[0]);
+            ::close(fds[1]);
+            return e;
+        }
+        ::close(fd);
+        fd = moved;
+    }
+    return 0;
+}
+
+// Reads the child's setup/exec error from a CLOEXEC pipe: the child writes
+// one int before _exit(127), or nothing — the write end closes with a
+// successful exec. Returns 0 on success, else the errno (the failed child is
+// reaped).
+int readSpawnError(int errPipe[2], pid_t child) {
+    ::close(errPipe[1]);
+    int    e       = 0;
+    size_t have    = 0;
+    int    readErr = 0;
+    while (have < sizeof e) {
+        const ssize_t n = ::read(errPipe[0], reinterpret_cast<char *>(&e) + have, sizeof e - have);
+        if (n > 0) {
+            have += size_t(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0)
+            readErr = errno;
+        break;
+    }
+    ::close(errPipe[0]);
+    if (have == sizeof e) {
+        int status = 0;
+        while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+        } // reap the failed child
+        return e;
+    }
+    if (readErr || have != 0) {
+        ::kill(child, SIGKILL);
+        int status = 0;
+        while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+        }
+        return readErr ? readErr : EIO;
+    }
+    return 0; // exec succeeded: the write end closed with the exec
+}
+
+// Shared fork/exec path. -1 maps a standard descriptor to /dev/null.
+// Inspect spawn attributes before fork; child setup uses only signal-safe calls.
+int spawnFork(
+    pid_t                   *pid,
+    const std::string       &exe,
+    char *const              argv[],
+    char *const              envp[],
+    const posix_spawnattr_t *attr,
+    const int (&stdio)[3],
+    const std::string &cwd = {}
+) {
+    short    flags  = 0;
+    pid_t    pgroup = 0;
+    sigset_t sigdef, sigmask;
+    posix_spawnattr_getflags(attr, &flags);
+    posix_spawnattr_getpgroup(attr, &pgroup);
+    posix_spawnattr_getsigdefault(attr, &sigdef);
+    posix_spawnattr_getsigmask(attr, &sigmask);
+    int errPipe[2] = {-1, -1};
+    if (const int e = spawnErrorPipe(errPipe))
+        return e;
+
+    const pid_t child = ::fork();
+    if (child < 0) {
+        const int e = errno;
+        ::close(errPipe[0]);
+        ::close(errPipe[1]);
+        return e;
+    }
+    if (child == 0) {
+        ::close(errPipe[0]);
+        const int  errfd = errPipe[1];
+        const auto fail  = [errfd](int e) {
+            const int saved = e;
+            while (::write(errfd, &saved, sizeof saved) < 0 && errno == EINTR) {
+            }
+            ::_exit(127);
+        };
+        for (int fd = 0; fd < 3; ++fd) {
+            const int source =
+                stdio[fd] >= 0 ? stdio[fd] : ::open("/dev/null", fd == 0 ? O_RDONLY : O_WRONLY);
+            if (source < 0 || (source != fd && ::dup2(source, fd) < 0))
+                fail(errno);
+            if (stdio[fd] < 0 && source != fd)
+                ::close(source);
+        }
+        if (!cwd.empty() && ::chdir(cwd.c_str()) < 0)
+            fail(errno);
+#ifdef POSIX_SPAWN_SETSID
+        if (flags & POSIX_SPAWN_SETSID) {
+            if (::setsid() < 0)
+                fail(errno);
+        } else
+#endif
+            if ((flags & POSIX_SPAWN_SETPGROUP) && ::setpgid(0, pgroup) < 0)
+            fail(errno);
+        if (const int e = resetSignalDefaults(sigdef))
+            fail(e);
+        if (::sigprocmask(SIG_SETMASK, &sigmask, nullptr) < 0)
+            fail(errno);
+        ::execve(exe.c_str(), argv, envp);
+        fail(errno);
+    }
+    const int e = readSpawnError(errPipe, child);
+    if (e != 0)
+        return e;
+    *pid = child;
+    return 0;
+}
+#endif
+
 } // namespace
 
 bool Process::start(const std::string &exe, const std::vector<std::string> &args) {
-    std::vector<char *>        argv = argvOf(exe, args);
+    std::vector<char *> argv = argvOf(exe, args);
+    posix_spawnattr_t   attr;
+    initSpawnAttr(&attr);
+    pid_t pid = 0;
+#ifdef MSGA_POSIX_SPAWN_ADDCHDIR_NP
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-    posix_spawnattr_t attr;
-    initSpawnAttr(&attr);
-    pid_t     pid = 0;
-    const int rc  = posix_spawn(&pid, exe.c_str(), &fa, &attr, argv.data(), environ);
+    const int rc = posix_spawn(&pid, exe.c_str(), &fa, &attr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&fa);
+#else
+    // OpenBSD's posix_spawn exits 127 in the child on exec failure instead of
+    // returning the errno; fork to learn whether the program started.
+    const int rc = spawnFork(&pid, exe, argv.data(), environ, &attr, {-1, -1, -1});
+#endif
     posix_spawnattr_destroy(&attr);
     if (rc != 0)
         return false;
@@ -603,6 +771,7 @@ RunResult run(const std::string &exe, const std::vector<std::string> &args, cons
         return r;
     }
 
+#ifdef MSGA_POSIX_SPAWN_ADDCHDIR_NP
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     if (feed)
@@ -626,6 +795,7 @@ RunResult run(const std::string &exe, const std::vector<std::string> &args, cons
 #pragma clang diagnostic pop
 #endif
     }
+#endif
     posix_spawnattr_t attr;
     initSpawnAttr(&attr); // as Process::start
     std::vector<char *>      argv = argvOf(exe, args);
@@ -637,11 +807,30 @@ RunResult run(const std::string &exe, const std::vector<std::string> &args, cons
             envp.push_back(e.data());
         envp.push_back(nullptr);
     }
-    pid_t     pid = 0;
-    const int rc  = posix_spawnp(
-        &pid, exe.c_str(), &fa, &attr, argv.data(), envp.empty() ? environ : envp.data()
-    );
+    pid_t        pid    = 0;
+    char *const *envArg = envp.empty() ? environ : envp.data();
+    int          rc     = 0;
+#ifdef MSGA_POSIX_SPAWN_ADDCHDIR_NP
+    rc = posix_spawnp(&pid, exe.c_str(), &fa, &attr, argv.data(), envArg);
     posix_spawn_file_actions_destroy(&fa);
+#else
+    // OpenBSD's posix_spawn reports an exec failure as a 127 exit, not a
+    // return value; fork so run() learns whether the program started.
+    // Paths containing a slash are relative to the child's cwd. PATH lookup
+    // retains run()'s search behavior; Process::start never searches PATH.
+    const std::string resolved = exe.find('/') != std::string::npos ? exe : findExecutable(exe);
+    rc = resolved.empty()
+             ? ENOENT
+             : spawnFork(
+                   &pid,
+                   resolved,
+                   argv.data(),
+                   envArg,
+                   &attr,
+                   {feed ? inPipe[0] : -1, outPipe[1], o.mergeStderr ? outPipe[1] : -1},
+                   o.cwd
+               );
+#endif
     posix_spawnattr_destroy(&attr);
     closeFd(outPipe[1]);
     closeFd(inPipe[0]);
@@ -718,9 +907,14 @@ RunResult run(const std::string &exe, const std::vector<std::string> &args, cons
 #ifndef F_SETNOSIGPIPE
         if (epipe) {
             // The SIGPIPE the failed write raised is pending on this thread:
-            // taken here, so unblocking does not deliver it.
-            const timespec zero{0, 0};
-            while (sigtimedwait(&pipeSet, nullptr, &zero) == SIGPIPE) {
+            // taken here, so unblocking does not deliver it. sigpending +
+            // sigwait is the portable spelling of sigtimedwait with a zero
+            // timeout (OpenBSD has no sigtimedwait).
+            sigset_t pending;
+            while (::sigpending(&pending) == 0 && ::sigismember(&pending, SIGPIPE)) {
+                int sig = 0;
+                if (::sigwait(&pipeSet, &sig) != 0)
+                    break;
             }
         }
 #endif
@@ -759,6 +953,22 @@ std::string executablePath() {
     out.resize(std::strlen(out.c_str()));
     char real[PATH_MAX];
     return ::realpath(out.c_str(), real) ? std::string(real) : out;
+#elif defined(__OpenBSD__)
+    // OpenBSD has no /proc/self/exe. Resolve argv[0] while the startup
+    // directory and PATH are still available (cached before main below).
+    static const std::string path = []() -> std::string {
+        int    mib[] = {CTL_KERN, KERN_PROC_ARGS, ::getpid(), KERN_PROC_ARGV};
+        size_t size  = 0;
+        if (::sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0)
+            return {};
+        std::vector<char *> args((size + sizeof(char *) - 1) / sizeof(char *));
+        if (::sysctl(mib, 4, args.data(), &size, nullptr, 0) != 0 || !args[0])
+            return {};
+        const std::string exe = findExecutable(args[0]);
+        char              real[PATH_MAX];
+        return !exe.empty() && ::realpath(exe.c_str(), real) ? std::string(real) : std::string();
+    }();
+    return path;
 #else
     char       buf[4096];
     const auto n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
@@ -767,6 +977,11 @@ std::string executablePath() {
 }
 
 namespace {
+
+#ifdef __OpenBSD__
+// Resolve relative argv[0] before callers can change the working directory.
+[[maybe_unused]] const bool g_executablePathCached = !executablePath().empty();
+#endif
 
 std::vector<std::string> *g_relaunchArgs = nullptr;
 
