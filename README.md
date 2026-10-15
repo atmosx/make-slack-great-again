@@ -74,9 +74,11 @@ The configure scripts install and check everything a build needs:
 ```sh
 ./scripts/configure-linux.sh    # for Linux (Debian/Ubuntu, apt)
 ./scripts/configure-mac.sh      # for macOS (Xcode command line tools + Homebrew)
+./scripts/configure-openbsd.sh  # for OpenBSD (Xenocara sets + pkg_add)
 ```
 
 - **Linux:** installs the compiler and build tools plus the development packages of FreeType, HarfBuzz, xkbcommon, Wayland, XCB and D-Bus. On other distributions, install the equivalents (the script lists them when apt isn't there). Add `--release` to also install what the release scripts use: Docker (checked, not installed), Xvfb and Wine.
+- **OpenBSD:** requires the Xenocara X11 sets; installs the remaining build dependencies with `pkg_add`. Uses X11 and sndio’s `aucat` audio helper. Self-updates and Wayland are off by default. Tested on OpenBSD 7.9 amd64; other BSDs are not yet validated.
 - **macOS:** only cmake, ninja and clang-format come from Homebrew. The app links nothing but the system frameworks, and msga's CMake builds FreeType and HarfBuzz itself.
 
 On Windows, run the PowerShell script from an **elevated** (Administrator) terminal. It uses winget to install Git and LLVM (for clang-format), and installs MSYS2 to `C:\msys64` (or `$env:MSYS2_ROOT`) with its mingw64 GCC, CMake, Ninja and Python:
@@ -101,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File scripts\configure-windows.ps1
 
 ```sh
 ./scripts/build.sh
-./build/msga                            # for Linux
+./build/msga                            # for Linux / OpenBSD
 ./build/msga.app/Contents/MacOS/msga    # for macOS
 ```
 
