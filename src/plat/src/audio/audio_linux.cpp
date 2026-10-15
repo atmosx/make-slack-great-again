@@ -45,6 +45,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 namespace plat::audio {
 
 namespace {
@@ -215,7 +219,7 @@ int64_t bytesPerFrame(const PcmFormat &f) {
     return 2 * int64_t(f.channels); // s16le
 }
 
-constexpr int    kSinkCount = 3;
+constexpr int    kSinkCount = 4;
 constexpr size_t kFfmpegCap = 1 << 20; // decoded PCM buffered ahead of the sink
 
 // Output helper i for raw s16le in format f: its name, *args its arguments.
@@ -228,9 +232,23 @@ const char *sinkArgs(int i, const PcmFormat &f, std::vector<std::string> *args) 
     case 1:
         *args = {"--raw", "--format=s16le", "--rate=" + rate, "--channels=" + ch};
         return "paplay";
-    default:
+    case 2:
         *args = {"-q", "-t", "raw", "-f", "S16_LE", "-r", rate, "-c", ch, "-"};
         return "aplay";
+    default:
+        *args = {
+            "-h",
+            "raw",
+            "-e",
+            "s16le",
+            "-r",
+            rate,
+            "-c",
+            "0:" + std::to_string(std::max(1, f.channels) - 1),
+            "-i",
+            "-"
+        };
+        return "aucat";
     }
 }
 
@@ -287,12 +305,14 @@ public:
 private:
     void run() {
         for (;;) {
+            // Drain before taking the commands: draining afterwards could
+            // swallow the wake for a command queued just after the swap.
+            _s->wake.clear();
             std::vector<PlayerShared::Cmd> cmds;
             {
                 std::lock_guard lock(_s->m);
                 cmds.swap(_s->cmds);
             }
-            _s->wake.clear();
             for (const auto &c : cmds) {
                 switch (c.op) {
                 case PlayerShared::Op::Load:
@@ -831,7 +851,7 @@ void PlayerWorker::post(PlayerEv ev, Failure f) {
 
 // ── Capture ─────────────────────────────────────────────────────────────────
 
-constexpr int    kCaptureCount    = 3;
+constexpr int    kCaptureCount    = 4;
 constexpr int    kLevelIntervalMs = 50;   // onLevel at ~20 Hz
 constexpr int    kFirstDataMs     = 4000; // helper running but silent this long = broken
 constexpr int    kStopGraceMs     = 1000; // helper ignoring SIGTERM this long = SIGKILL
@@ -849,9 +869,23 @@ const char *captureArgs(int i, std::vector<std::string> *args) {
     case 1:
         *args = {"--raw", "--format=s16le", "--rate=" + rate, "--channels=" + ch};
         return "parecord";
-    default:
+    case 2:
         *args = {"-q", "-t", "raw", "-f", "S16_LE", "-r", rate, "-c", ch, "-"};
         return "arecord";
+    default:
+        *args = {
+            "-h",
+            "raw",
+            "-e",
+            "s16le",
+            "-r",
+            rate,
+            "-c",
+            "0:" + std::to_string(Recorder::kChannels - 1),
+            "-o",
+            "-"
+        };
+        return "aucat";
     }
 }
 
@@ -906,13 +940,13 @@ private:
             return;
         }
         for (;;) {
+            _s->wake.clear(); // before reading state, so a later change keeps its wake
             bool stop, cancel;
             {
                 std::lock_guard lock(_s->m);
                 stop   = _s->stop;
                 cancel = _s->cancel;
             }
-            _s->wake.clear();
             if (cancel)
                 return;
             if (stop && !_stopping) {
@@ -1215,6 +1249,7 @@ bool playFile(const std::string &path) {
     return runHelper("pw-play", {path}) || runHelper("paplay", {path}) ||
            runHelper("ffplay", {"-nodisp", "-autoexit", "-loglevel", "quiet", path}) ||
            runHelper("aplay", {"-q", path}) || // WAV only, fine for the bundled chime
+           runHelper("aucat", {"-i", path}) || // OpenBSD sndio (WAV/AIFF/AU)
            runHelper("canberra-gtk-play", {"-f", path});
 }
 
