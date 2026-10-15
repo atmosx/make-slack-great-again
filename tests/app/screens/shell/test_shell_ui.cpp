@@ -90,7 +90,13 @@ struct Fake : fake::FakeBackend {
             );
         done(false, statusError);
     }
-    void loadMembers(ConvRef conv, MembersDone done) override {
+    MembersDone heldMembers;
+    bool        holdMembers = false;
+    void        loadMembers(ConvRef conv, MembersDone done) override {
+        if (holdMembers) {
+            heldMembers = std::move(done);
+            return;
+        }
         if (membersError.empty())
             return fake::FakeBackend::loadMembers(conv, std::move(done));
         done({}, membersError);
@@ -729,11 +735,16 @@ TEST("header: the members popup grows to its list when the count was unknown") {
     hd.refresh();
     CHECK_FALSE(hd.memberCount()->visible());
     const ui::RectF anchor{900, 40, 40, 28};
+    // Keep the loading state deterministic even on a slow first frame.
+    h.backend.holdMembers = true;
     hd.openMembers(anchor);
     pump();
     ui::Popup *p = h.win->topPopup();
     REQUIRE(p != nullptr);
     const float loading = p->frame().h; // one row while the count is unknown
+    REQUIRE(bool(h.backend.heldMembers));
+    h.backend.holdMembers = false;
+    h.backend.loadMembers(design, std::move(h.backend.heldMembers));
     REQUIRE(until([&] { return hasText(p, "9 members"); }));
     pump();
     // Six whole rows of 60 (the cap), still under the button and in the window.

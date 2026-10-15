@@ -233,7 +233,11 @@ TEST("layout: per-view footprint stays small") {
         sizeof(ui::VirtualList)
     );
     CHECK(sizeof(ui::View) <= 192);
-    CHECK(sizeof(ui::Label) <= sizeof(ui::View) + 112);
+    // The string and callback sizes/alignment vary between standard libraries.
+    CHECK(
+        sizeof(ui::Label) <=
+        sizeof(ui::View) + sizeof(std::string) + sizeof(std::function<void(uint32_t)>) + 64
+    );
 }
 
 namespace plat::testing_internal {

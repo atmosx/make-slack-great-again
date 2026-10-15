@@ -3,7 +3,25 @@
 #include "linux/xkb_keyboard.h"
 #include "test_util.h"
 
-#include <linux/input-event-codes.h>
+// Linux evdev ABI values: these tests do not require Linux headers.
+enum {
+    KEY_ESC        = 1,
+    KEY_BACKSPACE  = 14,
+    KEY_TAB        = 15,
+    KEY_Q          = 16,
+    KEY_E          = 18,
+    KEY_I          = 23,
+    KEY_ENTER      = 28,
+    KEY_LEFTCTRL   = 29,
+    KEY_A          = 30,
+    KEY_H          = 35,
+    KEY_APOSTROPHE = 40,
+    KEY_LEFTSHIFT  = 42,
+    KEY_C          = 46,
+    KEY_F5         = 63,
+    KEY_LEFT       = 105,
+    KEY_DELETE     = 111,
+};
 
 using namespace plat;
 using namespace plat::linux_input;
@@ -127,6 +145,31 @@ void testDeadKeyCompose() {
     CHECK(e.text == "é");
 }
 
+#ifndef __linux__
+void testNonEvdevNavigation() {
+    XkbKeyboard kb;
+    // Deliberately collide with evdev letter codes: X11 keycodes are opaque.
+    const char *map = R"(xkb_keymap {
+        xkb_keycodes { minimum = 8; maximum = 255; <UP> = 38; <LEFT> = 39; <KP> = 40; };
+        xkb_types { type "ONE_LEVEL" { modifiers = none; map[None] = Level1; }; };
+        xkb_compatibility {};
+        xkb_symbols {
+            key <UP> { [ Up ] }; key <LEFT> { [ Left ] }; key <KP> { [ KP_End ] };
+        };
+    };)";
+    auto       *km  = xkb_keymap_new_from_string(
+        kb.context(), map, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS
+    );
+    CHECK(km != nullptr);
+    if (!km)
+        return;
+    kb.setKeymap(km);
+    CHECK(kb.keyFor(38) == Key::Up);
+    CHECK(kb.keyFor(39) == Key::Left);
+    CHECK(kb.keyFor(40) == Key::Kp1);
+}
+#endif
+
 void testEvdevRoundTrip() {
     for (int k = int(Key::A); k < int(Key::Count); ++k) {
         const uint32_t code = evdevFromKey(Key(k));
@@ -147,5 +190,8 @@ int main() {
     runCase("ru only: falls back to US position", testCyrillicAloneFallsBackToUsPosition);
     runCase("dead key + e composes é", testDeadKeyCompose);
     runCase("evdev <-> Key tables are consistent", testEvdevRoundTrip);
+#ifndef __linux__
+    runCase("non-evdev navigation uses XKB symbols", testNonEvdevNavigation);
+#endif
     return plat_test::summary();
 }
