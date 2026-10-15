@@ -186,6 +186,7 @@ bool stat(std::string_view path, Stat *out) {
     out->size        = out->isDir ? 0 : (int64_t(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
     out->mtimeMicros = unixMicros(d.ftLastWriteTime);
     out->birthMicros = unixMicros(d.ftCreationTime);
+    out->device = out->inode = 0;
     return true;
 }
 
@@ -317,8 +318,10 @@ bool stat(std::string_view path, Stat *out) {
     struct stat       st;
     if (p.empty() || ::stat(p.c_str(), &st) != 0)
         return false;
-    out->isDir = S_ISDIR(st.st_mode);
-    out->size  = out->isDir ? 0 : int64_t(st.st_size);
+    out->isDir  = S_ISDIR(st.st_mode);
+    out->size   = out->isDir ? 0 : int64_t(st.st_size);
+    out->device = uint64_t(st.st_dev);
+    out->inode  = uint64_t(st.st_ino);
 #ifdef __APPLE__
     out->mtimeMicros = int64_t(st.st_mtimespec.tv_sec) * 1000000 + st.st_mtimespec.tv_nsec / 1000;
     out->birthMicros =

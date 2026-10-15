@@ -65,12 +65,15 @@ bool    touch(std::string_view path);
 
 // What the file system says about a path (links followed).
 struct Stat {
-    int64_t size        = 0; // bytes; 0 for a directory
-    int64_t mtimeMicros = 0; // last modification, unix microseconds
+    int64_t  size        = 0; // bytes; 0 for a directory
+    int64_t  mtimeMicros = 0; // last modification, unix microseconds
     // Creation, where the file system keeps it (Windows, macOS, Linux statx);
     // else mtimeMicros.
-    int64_t birthMicros = 0;
-    bool    isDir       = false;
+    int64_t  birthMicros = 0;
+    bool     isDir       = false;
+    // POSIX file identity, to detect atomic replacement at the same mtime/size.
+    // Zero on platforms where this query does not provide it.
+    uint64_t device = 0, inode = 0;
 };
 // False (*out untouched) when the path is missing or can't be looked at.
 bool stat(std::string_view path, Stat *out);

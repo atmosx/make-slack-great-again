@@ -252,6 +252,13 @@ TEST("roster: a scan reads only the job states that changed since the last") {
 
     // Rewritten: read again. Gone: dropped from the cache too.
     REQUIRE(file::writeAtomic(state, R"({"state":"blocked","sessionId":"aaaa1111-x","cwd":"/a"})"));
+#ifndef _WIN32
+    // Model a coarse timestamp: the same-sized atomic replacement must be
+    // noticed even when the cached mtime matches the new file.
+    file::Stat replaced;
+    REQUIRE(file::stat(state, &replaced));
+    cache.byJob["aaaa1111"].mtimeMicros = replaced.mtimeMicros;
+#endif
     file::remove(paths.jobsDir() + "/bbbb2222/state.json");
     file::remove(paths.jobsDir() + "/bbbb2222");
     const auto again = scanSessions(paths, nullptr, &cache);

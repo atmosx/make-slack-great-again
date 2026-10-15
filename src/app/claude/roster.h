@@ -129,11 +129,12 @@ strandedWorker(const Paths &paths, std::string_view sessionId, std::string_view 
 void signalProcess(int64_t pid, bool force);
 
 // Each job's state.json and each sessions/<pid>.json as parsed when it last
-// changed (size and mtime), so a scan that runs every few seconds reads only
+// changed (identity, size and mtime), so a scan every few seconds reads only
 // the files that did.
 struct JobStateCache {
     struct Entry {
         int64_t                    size = -1, mtimeMicros = -1;
+        uint64_t                   device = 0, inode = 0;
         std::optional<SessionInfo> job; // parseBackgroundJob's / parseInteractiveSession's
     };
     using Files = std::unordered_map<std::string, Entry>;
