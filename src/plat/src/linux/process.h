@@ -17,6 +17,10 @@ std::string_view defaultSearchPath();
 // of the ':'-separated `searchPath` that has one (empty entries skipped), or "".
 std::string findExecutable(const char *name, std::string_view searchPath);
 
+// Absolute path of this executable, or "" when unavailable. On OpenBSD,
+// resolves argv[0] before main while the startup directory and PATH are intact.
+std::string executablePath();
+
 void closeFd(int &fd); // closes fd if open and sets it to -1
 
 enum Pipes : unsigned { kStdin = 1, kStdout = 2, kStderr = 4 };

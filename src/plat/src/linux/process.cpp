@@ -4,6 +4,10 @@
 #include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits.h>
+#ifdef __OpenBSD__
+#include <sys/sysctl.h>
+#endif
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -34,6 +38,52 @@ std::string findExecutable(const char *name, std::string_view rest) {
     }
     return {};
 }
+
+std::string executablePath() {
+#ifdef __OpenBSD__
+    // No /proc/self/exe on OpenBSD. Capture argv[0] before main can change
+    // the working directory, PATH, or the process title (see the initializer below).
+    static const std::string path = []() -> std::string {
+        int    mib[] = {CTL_KERN, KERN_PROC_ARGS, ::getpid(), KERN_PROC_ARGV};
+        size_t size  = 0;
+        if (::sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size < sizeof(char *))
+            return {};
+        std::vector<char *> args((size + sizeof(char *) - 1) / sizeof(char *));
+        if (::sysctl(mib, 4, args.data(), &size, nullptr, 0) != 0 || !args[0])
+            return {};
+        std::string exe = args[0];
+        if (exe.find('/') == std::string::npos) {
+            // Empty PATH entries mean the startup working directory.
+            std::string_view rest = defaultSearchPath();
+            for (;;) {
+                const size_t      colon = rest.find(':');
+                const auto        dir   = rest.substr(0, colon);
+                const std::string found = findExecutable(exe.c_str(), dir.empty() ? "." : dir);
+                if (!found.empty()) {
+                    exe = found;
+                    break;
+                }
+                if (colon == std::string_view::npos)
+                    return {};
+                rest.remove_prefix(colon + 1);
+            }
+        }
+        char real[PATH_MAX];
+        return ::realpath(exe.c_str(), real) ? std::string(real) : std::string();
+    }();
+    return path;
+#else
+    char          buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf);
+    return n > 0 && size_t(n) < sizeof buf ? std::string(buf, size_t(n)) : std::string();
+#endif
+}
+
+#ifdef __OpenBSD__
+namespace {
+[[maybe_unused]] const bool g_executablePathCached = !executablePath().empty();
+}
+#endif
 
 void closeFd(int &fd) {
     if (fd >= 0)

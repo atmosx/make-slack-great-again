@@ -20,6 +20,7 @@
 #include "core/strings.h"
 #include "core/wire.h"
 #include "linux/files.h"
+#include "linux/process.h"
 
 #include <algorithm>
 #include <cctype>
@@ -207,16 +208,16 @@ private:
             const int c = accept4(_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (c < 0)
                 return; // EAGAIN, or a transient error: the next wakeup retries
-            // The directory is private already; the peer check keeps a
-            // mis-set $XDG_RUNTIME_DIR from opening us to other users.
+                        // The directory is private already; the peer check keeps a
+                        // mis-set $XDG_RUNTIME_DIR from opening us to other users.
 #if defined(__linux__)
-            ucred     cr{};
-            socklen_t len = sizeof cr;
+            ucred      cr{};
+            socklen_t  len     = sizeof cr;
             const bool trusted = getsockopt(c, SOL_SOCKET, SO_PEERCRED, &cr, &len) == 0 &&
                                  len == sizeof cr && cr.uid == getuid();
 #else
-            uid_t peerUid;
-            gid_t peerGid;
+            uid_t      peerUid;
+            gid_t      peerGid;
             const bool trusted = getpeereid(c, &peerUid, &peerGid) == 0 && peerUid == getuid();
 #endif
             if (!trusted || _conns.size() >= kMaxConns) {
@@ -550,12 +551,8 @@ bool registerUrlScheme(BackendApp &app, std::string_view schemeIn) {
     // (a distro package), and forwarded URLs should still reach OpenUrls.
     core::rememberScheme(schemes(), scheme);
 
-    char          exeBuf[4096];
-    const ssize_t exeLen = readlink("/proc/self/exe", exeBuf, sizeof exeBuf);
-    if (exeLen <= 0 || size_t(exeLen) >= sizeof exeBuf)
-        return false;
-    const std::string exePath(exeBuf, size_t(exeLen));
-    if (exePath.find_first_of("\n\r") != std::string::npos)
+    const std::string exePath = linux_process::executablePath();
+    if (exePath.empty() || exePath.find_first_of("\n\r") != std::string::npos)
         return false;
 
     const std::string dataHome = standardDir(StandardDir::Data);
