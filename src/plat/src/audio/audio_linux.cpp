@@ -305,12 +305,14 @@ public:
 private:
     void run() {
         for (;;) {
+            // Drain before taking the commands: draining afterwards could
+            // swallow the wake for a command queued just after the swap.
+            _s->wake.clear();
             std::vector<PlayerShared::Cmd> cmds;
             {
                 std::lock_guard lock(_s->m);
                 cmds.swap(_s->cmds);
             }
-            _s->wake.clear();
             for (const auto &c : cmds) {
                 switch (c.op) {
                 case PlayerShared::Op::Load:
@@ -938,13 +940,13 @@ private:
             return;
         }
         for (;;) {
+            _s->wake.clear(); // before reading state, so a later change keeps its wake
             bool stop, cancel;
             {
                 std::lock_guard lock(_s->m);
                 stop   = _s->stop;
                 cancel = _s->cancel;
             }
-            _s->wake.clear();
             if (cancel)
                 return;
             if (stop && !_stopping) {

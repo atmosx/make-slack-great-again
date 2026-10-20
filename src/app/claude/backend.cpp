@@ -1830,13 +1830,19 @@ void Backend::sync(Tracked &t) {
     take();
     // The message on its way is delivered once its prompt is in the
     // transcript: msga's copy of it goes in the same breath.
-    if (t.flying && t.announcedInit && std::any_of(now.begin(), now.end(), [&](const auto &n) {
-            return n.second.mine && !t.announced.count(n.first) && !isOutgoingCopy(t, n.first);
+    // A restored session can be classified as a thread while its send is
+    // in flight, resetting announcedInit. Its new prompt is still delivery,
+    // not old history. enqueue reserves the outgoing ts in the parser, so
+    // historical prompts cannot satisfy this check.
+    bool sawOwnPrompt = false;
+    if (t.flying && std::any_of(now.begin(), now.end(), [&](const auto &n) {
+            return n.second.mine && n.first > t.flying->ts && !t.announced.count(n.first) &&
+                   !isOutgoingCopy(t, n.first);
         })) {
         t.flying.reset();
+        sawOwnPrompt = true;
         take();
     }
-    bool            sawOwnPrompt = false;
     std::vector<Ts> fresh; // news in a list the Store doesn't hold
     if (!t.announcedInit) {
         // First look at this session: its history is served by loadHistory,
