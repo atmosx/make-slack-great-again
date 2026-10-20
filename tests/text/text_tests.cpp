@@ -190,10 +190,8 @@ void cjkFallback() {
     const std::string fam = fonts::familyName(f);
     std::printf("  日 → %s\n", fam.c_str());
     CHECK(fonts::hasGlyph(f, 0x65E5) && fonts::hasGlyph(f, 0x8A9E));
-    CHECK(
-        fam.find("cjk") != std::string::npos || fam.find("droid") != std::string::npos ||
-        fam.find("han") != std::string::npos || fam.find("gothic") != std::string::npos
-    );
+    // Glyph coverage and layout matter, not the installed family name
+    // (e.g. Unifont also supplies CJK glyphs).
     CHECK(fonts::hasGlyph(fonts::fallback(0x0634, Style{}), 0x0634)); // Arabic
     CHECK(fonts::hasGlyph(fonts::fallback(0x05D0, Style{}), 0x05D0)); // Hebrew
     const FontKey cyr = fonts::primary(Style{});

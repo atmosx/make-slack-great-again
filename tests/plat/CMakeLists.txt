@@ -13,6 +13,23 @@ if(PLAT_LINUX_INPUT)
     add_test(NAME plat_xkb_tests COMMAND plat_xkb_tests)
 endif()
 
+if(UNIX AND NOT APPLE)
+    add_executable(plat_process_tests process_tests.cpp)
+    target_link_libraries(plat_process_tests PRIVATE plat)
+    target_include_directories(plat_process_tests PRIVATE ${PLAT_DIR}/src)
+    add_test(NAME plat_process_absolute COMMAND plat_process_tests
+        $<TARGET_FILE:plat_process_tests> $<TARGET_FILE:plat_process_tests>)
+    # The env wrapper prevents CTest from rewriting the relative command to
+    # an absolute path: argv[0] must exercise the startup-directory fallback.
+    add_test(NAME plat_process_relative COMMAND ${CMAKE_COMMAND} -E env
+        ./plat_process_tests $<TARGET_FILE:plat_process_tests> ./plat_process_tests)
+    add_test(NAME plat_process_path COMMAND ${CMAKE_COMMAND} -E env
+        "PATH=$<TARGET_FILE_DIR:plat_process_tests>:$ENV{PATH}"
+        plat_process_tests $<TARGET_FILE:plat_process_tests> plat_process_tests)
+    set_tests_properties(plat_process_relative PROPERTIES
+        WORKING_DIRECTORY $<TARGET_FILE_DIR:plat_process_tests>)
+endif()
+
 # Exercises the real backend end to end (window, present + readback, input
 # through the OS, clipboard, timers, cross-thread post). Needs a display:
 # src/plat/scripts/plat-selftest-*.sh provide one per backend (Xvfb,

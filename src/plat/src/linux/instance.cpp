@@ -20,6 +20,7 @@
 #include "core/strings.h"
 #include "core/wire.h"
 #include "linux/files.h"
+#include "linux/process.h"
 
 #include <algorithm>
 #include <cctype>
@@ -36,6 +37,10 @@
 #include <sys/time.h> // timeval (glibc's sys/socket.h brings it, musl's doesn't)
 #include <sys/un.h>
 #include <unistd.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 namespace plat::linux_instance {
 
@@ -203,15 +208,26 @@ private:
             const int c = accept4(_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (c < 0)
                 return; // EAGAIN, or a transient error: the next wakeup retries
-            // The directory is private already; the peer check keeps a
-            // mis-set $XDG_RUNTIME_DIR from opening us to other users.
-            ucred     cr{};
-            socklen_t len = sizeof cr;
-            if (getsockopt(c, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0 || cr.uid != getuid() ||
-                _conns.size() >= kMaxConns) {
+                        // The directory is private already; the peer check keeps a
+                        // mis-set $XDG_RUNTIME_DIR from opening us to other users.
+#if defined(__linux__)
+            ucred      cr{};
+            socklen_t  len     = sizeof cr;
+            const bool trusted = getsockopt(c, SOL_SOCKET, SO_PEERCRED, &cr, &len) == 0 &&
+                                 len == sizeof cr && cr.uid == getuid();
+#else
+            uid_t      peerUid;
+            gid_t      peerGid;
+            const bool trusted = getpeereid(c, &peerUid, &peerGid) == 0 && peerUid == getuid();
+#endif
+            if (!trusted || _conns.size() >= kMaxConns) {
                 close(c);
                 continue;
             }
+#ifdef SO_NOSIGPIPE
+            const int one = 1;
+            setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
             auto  conn = std::make_unique<Conn>();
             Conn *p    = conn.get();
             p->fd      = c;
@@ -504,6 +520,10 @@ bool claim(
         const int c = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (c < 0)
             break;
+#ifdef SO_NOSIGPIPE
+        const int one = 1;
+        setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
         if (connect(c, reinterpret_cast<sockaddr *>(&addr), sizeof addr) == 0) {
             unlock(); // the primary is up; later launches need not wait for us
             forward(c, args);
@@ -531,12 +551,8 @@ bool registerUrlScheme(BackendApp &app, std::string_view schemeIn) {
     // (a distro package), and forwarded URLs should still reach OpenUrls.
     core::rememberScheme(schemes(), scheme);
 
-    char          exeBuf[4096];
-    const ssize_t exeLen = readlink("/proc/self/exe", exeBuf, sizeof exeBuf);
-    if (exeLen <= 0 || size_t(exeLen) >= sizeof exeBuf)
-        return false;
-    const std::string exePath(exeBuf, size_t(exeLen));
-    if (exePath.find_first_of("\n\r") != std::string::npos)
+    const std::string exePath = linux_process::executablePath();
+    if (exePath.empty() || exePath.find_first_of("\n\r") != std::string::npos)
         return false;
 
     const std::string dataHome = standardDir(StandardDir::Data);

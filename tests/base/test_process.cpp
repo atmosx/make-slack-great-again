@@ -74,7 +74,34 @@ TEST("process: run captures stdout and the exit code") {
     CHECK(r.code == 3);
     CHECK_STR(r.output, "one\ntwo");
     CHECK(sh("true").code == 0);
+    // 127 is also a legitimate program exit, not proof of exec failure.
+    const auto exited127 = sh("exit 127");
+    CHECK(exited127.started);
+    CHECK(exited127.code == 127);
 }
+
+TEST("process: a bad working directory is a launch failure") {
+    base::RunOptions o;
+    o.cwd        = "/nonexistent/msga-working-directory";
+    const auto r = sh("echo should-not-run", o);
+    CHECK_FALSE(r.started);
+    CHECK(r.code == -1);
+    CHECK_FALSE(r.output.empty());
+}
+
+#if defined(__linux__) || defined(__APPLE__) || defined(__OpenBSD__)
+TEST("process: executable path stays absolute after changing directory") {
+    const std::string exe = base::executablePath();
+    REQUIRE(!exe.empty());
+    CHECK(exe.front() == '/');
+    CHECK(file::exists(exe));
+    char cwd[4096];
+    REQUIRE(::getcwd(cwd, sizeof cwd) != nullptr);
+    REQUIRE(::chdir("/") == 0);
+    CHECK_STR(base::executablePath(), exe);
+    CHECK(::chdir(cwd) == 0);
+}
+#endif
 
 TEST("process: stderr is merged, or discarded") {
     CHECK_STR(sh("echo out; echo err >&2").output, "out\nerr\n");
@@ -131,6 +158,19 @@ TEST("process: cwd and environment overrides") {
     base::test::unsetEnv("MSGA_RUN_TEST_UNSET");
     // PATH is still ours: commands are found.
     CHECK(sh("command -v sh >/dev/null", o).code == 0);
+    file::remove(dir);
+}
+
+TEST("process: executable paths are relative to the child working directory") {
+    const std::string dir = tempDir();
+    REQUIRE(file::writeAtomic(dir + "/child", "#!/bin/sh\nprintf relative", 0755));
+    base::RunOptions o;
+    o.cwd        = dir;
+    const auto r = base::run("./child", {}, o);
+    CHECK(r.started);
+    CHECK(r.code == 0);
+    CHECK_STR(r.output, "relative");
+    file::remove(dir + "/child");
     file::remove(dir);
 }
 

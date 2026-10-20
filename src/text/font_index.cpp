@@ -456,6 +456,9 @@ std::vector<std::string> fontRoots() {
         if (std::find(roots.begin(), roots.end(), d) == roots.end())
             roots.push_back(d);
     }
+#if defined(__OpenBSD__)
+    roots.push_back("/usr/X11R6/lib/X11/fonts");
+#endif
     return roots;
 }
 

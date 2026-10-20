@@ -18,6 +18,10 @@ extern "C" size_t __sanitizer_get_current_allocated_bytes();
 #include <dirent.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
+#elif defined(__OpenBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
 #elif defined(_WIN32)
 #define PSAPI_VERSION 2 // K32GetProcessMemoryInfo, in kernel32
 #include <windows.h>
@@ -59,6 +63,13 @@ long rssKb() {
         KERN_SUCCESS)
         return long(info.resident_size / 1024);
     return -1;
+#elif defined(__OpenBSD__)
+    struct kinfo_proc info{};
+    int               mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, ::getpid(), sizeof(info), 1};
+    size_t            size  = sizeof(info);
+    if (::sysctl(mib, 6, &info, &size, nullptr, 0) == 0 && size == sizeof(info))
+        return long(info.p_vm_rssize) * (::sysconf(_SC_PAGESIZE) / 1024);
+    return -1;
 #else
     return -1;
 #endif
@@ -87,6 +98,10 @@ uint64_t privateBytes() {
     if (task_info(mach_task_self(), TASK_VM_INFO, task_info_t(&info), &n) != KERN_SUCCESS)
         return 0;
     return info.phys_footprint;
+#elif defined(__OpenBSD__)
+    // No private-footprint query: use current RSS, as on older Linux kernels.
+    const long kb = rssKb();
+    return kb > 0 ? uint64_t(kb) * 1024 : 0;
 #elif defined(_WIN32)
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     if (!GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc))

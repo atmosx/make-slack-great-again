@@ -30,7 +30,7 @@ inline constexpr size_t kThreadStack = 256 * 1024;
 
 // A request's cancel flag plus an OS object that set() signals, so a
 // transport blocked on the request wakes at once instead of polling the
-// flag: an eventfd (POSIX), a manual-reset event (Windows), a dispatch
+// flag: an eventfd or pipe (POSIX), a manual-reset event (Windows), a dispatch
 // semaphore that the exchange also waits on for its answer (macOS). Made
 // on the UI thread with the request, set there by Client::cancel or the
 // Client's destructor. If the OS object can't be made, waits fall back to
@@ -52,6 +52,9 @@ public:
 private:
     std::atomic<bool> _flag{false};
     intptr_t          _os = -1;
+#if !defined(_WIN32) && !defined(__APPLE__)
+    int _wakeWrite = -1; // self-pipe writer on systems without eventfd
+#endif
 };
 
 // One HTTP exchange — no redirect following, no cookie handling, no

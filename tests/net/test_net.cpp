@@ -397,6 +397,7 @@ TEST("multipart: fields, a file, the closing boundary") {
 }
 
 #ifdef NET_TEST_POSIX
+#ifdef __linux__
 namespace {
 // The voluntary context switches of thread `tid` so far (Linux /proc).
 long voluntarySwitches(pid_t tid) {
@@ -408,6 +409,7 @@ long voluntarySwitches(pid_t tid) {
     return -1;
 }
 } // namespace
+#endif
 
 // An idle WebSocket reader waits with a wake fd and no deadline: it must
 // sleep until something happens (no 4×/s poll timeouts), yet an abort (flag +
@@ -416,20 +418,27 @@ TEST("posix waitFd: a wake-fd wait blocks without periodic wakeups, aborts at on
     int data[2], wake[2];
     REQUIRE(pipe2(data, O_NONBLOCK | O_CLOEXEC) == 0);
     REQUIRE(pipe2(wake, O_NONBLOCK | O_CLOEXEC) == 0);
-    std::atomic<bool>    cancel{false};
-    std::atomic<pid_t>   tid{0};
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> waiting{false};
+#ifdef __linux__
+    std::atomic<pid_t> tid{0};
+#endif
     std::atomic<int>     result{-1};
     std::atomic<int64_t> returnedAt{0};
     std::thread          t([&] {
-        tid.store(gettid());
         net::detail::Waiter w;
         w.cancel = &cancel;
         w.wakeFd = wake[0];
+#ifdef __linux__
+        tid.store(gettid());
+#endif
+        waiting.store(true);
         result.store(int(net::detail::waitFd(data[0], POLLIN, w, true)));
         returnedAt.store(msNow());
     });
-    while (!tid.load())
+    while (!waiting.load())
         std::this_thread::yield();
+#ifdef __linux__
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const long before = voluntarySwitches(tid.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
@@ -437,6 +446,7 @@ TEST("posix waitFd: a wake-fd wait blocks without periodic wakeups, aborts at on
     CHECK(before >= 0);
     // The old 250 ms slices woke it 4 times here.
     CHECK(after - before <= 1);
+#endif
     CHECK(result.load() == -1);
 
     const int64_t aborted = msNow();
@@ -986,7 +996,7 @@ TEST("error: cancel wakes a blocked exchange at once") {
     }
 }
 
-#ifdef NET_TEST_POSIX
+#if defined(NET_TEST_POSIX) && defined(__linux__)
 namespace {
 int threadCount() {
     int  n = 0;
@@ -1006,7 +1016,7 @@ TEST("client: idle workers end; the next request starts one") {
     net::detail::setWorkerIdleMs(150);
     {
         net::Client c(app());
-#ifdef NET_TEST_POSIX
+#ifdef __linux__
         const int before = threadCount();
 #endif
         for (int round = 0; round < 2; ++round) {
@@ -1016,11 +1026,11 @@ TEST("client: idle workers end; the next request starts one") {
                     done += r.body == "hello world";
                 });
             REQUIRE(pumpUntil([&] { return done == 3; }));
-#ifdef NET_TEST_POSIX
+#ifdef __linux__
             CHECK(threadCount() > before);
 #endif
             pumpFor(500); // past the idle time: every worker has ended
-#ifdef NET_TEST_POSIX
+#ifdef __linux__
             CHECK(threadCount() == before);
 #endif
         }
@@ -1109,6 +1119,14 @@ TEST("tls: a reconnect resumes the session (TLS 1.3 and 1.2)") {
     for (const std::string &base : {srv.tlsBase, srv.tls12Base}) {
         if (base.empty())
             continue;
+#ifdef __OpenBSD__
+        // Python/LibreSSL on OpenBSD does not resume TLS 1.3 sessions in
+        // this fixture, even with a Python client. TLS 1.2 remains covered.
+        if (base == srv.tlsBase) {
+            skip("TLS 1.3 resumption", "Python/LibreSSL fixture limitation");
+            continue;
+        }
+#endif
         const net::Response first = get(base + "/tls-session");
         CHECK_STR(first.error, "");
         const int64_t before = net::detail::tlsResumptions();

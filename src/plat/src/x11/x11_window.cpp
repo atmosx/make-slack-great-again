@@ -670,6 +670,7 @@ bool X11Window::allocBuffer(int w, int h) {
     bool fd   = false;
     if (_app->shmMode(&fd)) {
         void *mem = nullptr;
+#if defined(__linux__)
         if (fd) {
             // memfd + fd passing (MIT-SHM 1.2): no SysV ids, works across
             // IPC namespaces (Flatpak, containers).
@@ -693,7 +694,9 @@ bool X11Window::allocBuffer(int w, int h) {
             } else if (mfd >= 0) {
                 close(mfd);
             }
-        } else {
+        } else
+#endif
+        {
             const int id = shmget(IPC_PRIVATE, nb.bytes, IPC_CREAT | 0600);
             if (id >= 0) {
                 mem = shmat(id, nullptr, 0);

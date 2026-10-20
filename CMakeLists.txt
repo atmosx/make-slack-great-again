@@ -133,12 +133,26 @@ elseif(MSGA_STATIC)
         -Wl,-z,stack-size=8388608)
 endif()
 
+if(EXISTS "/usr/X11R6/lib/pkgconfig")
+    # OpenBSD Xenocara installs X11/xcb and freetype2 .pc files under /usr/X11R6.
+    if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT "$ENV{PKG_CONFIG_PATH}" STREQUAL "")
+        set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:/usr/X11R6/lib/pkgconfig")
+    else()
+        set(ENV{PKG_CONFIG_PATH} "/usr/X11R6/lib/pkgconfig")
+    endif()
+endif()
+
 # What a distribution's package turns off, its package manager doing both:
 # msga replacing its own binary with the next release (app/update), and, on
 # Linux, writing its own ~/.local/share/applications/msga.desktop on every
 # start (screens/shell/desktop_entry.cpp), which names this build's path.
-option(MSGA_SELF_UPDATE "Check msga.app for new releases and install them" ON)
-option(MSGA_INSTALL_LAUNCHER "Linux: write the user's msga.desktop launcher entry at startup" ON)
+if(CMAKE_SYSTEM_NAME MATCHES "BSD")
+    set(_self_update_default OFF)
+else()
+    set(_self_update_default ON)
+endif()
+option(MSGA_SELF_UPDATE "Check msga.app for new releases and install them" ${_self_update_default})
+option(MSGA_INSTALL_LAUNCHER "Linux: write the user's msga.desktop launcher entry at startup" ${_self_update_default})
 # On msga_flags: the updater's UI (the update bar, Settings' update checks)
 # and its tests compile out with it, not only app/update.
 foreach(opt MSGA_SELF_UPDATE MSGA_INSTALL_LAUNCHER)
